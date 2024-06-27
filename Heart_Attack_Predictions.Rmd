@@ -1,0 +1,323 @@
+---
+title: "Heart Attack Predictions"
+author: "Sam Mayuski"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+## Reading data and creating train/test datasets
+```{r}
+set.seed(4241)
+library(caret)
+library(class)
+library(e1071)
+library(MASS)
+library(tree)
+library(rpart)
+library(rpart.plot)
+library(corrplot)
+library(randomForest)
+library(xgboost)
+library(adabag)
+library(Rtsne)
+library(factoextra)
+
+data = read.csv("~/STA4241/heartattack.csv")
+data$Result = ifelse(data$Result == "positive", 1, 0)
+
+trainIndices = sample(1:nrow(data), size = floor(nrow(data) * 0.8), replace = FALSE)
+testIndices = base::setdiff(1:nrow(data), trainIndices)
+
+train = data[trainIndices,]
+test = data[testIndices,]
+
+xTrain = train[, -9]
+yTrain = train[, 9]
+
+xTest = test[, -9]
+yTest = test[, 9]
+```
+
+
+## Exploratory data analysis
+```{r, fig.width = 9}
+corrplot::corrplot(cor(xTrain), method = "color")
+summary(data)
+
+#histograms of attributes
+par(mfrow = c(2, 2))
+hist(data$Age, breaks = "Scott", main = "Age", xlab = "Age")
+hist(data$Result, breaks = "Scott", main = "Result", xlab = "Result")
+hist(data$CK.MB, breaks = "Scott", main = "CK.MB", xlab = "CK.MB")
+hist(data$Troponin, breaks = "Scott", main = "Troponin", xlab = "Troponin")
+
+par(mfrow = c(2, 2))
+hist(data$Heart.rate, breaks = "Scott", main = "Heart Rate", xlab = "Heart Rate")
+hist(data$Systolic.blood.pressure, breaks = "Scott", main = "Systolic", xlab = "Systolic")
+hist(data$Diastolic.blood.pressure, breaks = "Scott", main = "Diastolic", xlab = "Diastolic")
+hist(data$Blood.sugar, breaks = "Scott", main = "Blood Sugar", xlab = "Blood Sugar")
+
+#inverse transform method on Age attribute
+par(mfrow = c(1, 1))
+u = runif(1000)
+z = qnorm(u, mean(data$Age), sd(data$Age))
+
+hist1 = hist(z, breaks = "Scott", main = "Inverse Transform on Age")
+hist2 = hist(data$Age, breaks = "Scott", main = "Age", xlab = "Age")
+
+color1 = rgb(0, 0, 1, 0.25)
+color2 = rgb(1, 0, 0, 0.25)
+overlap = rgb(0.5, 0, 0.5, 0.45)
+
+#plotting overlap of observed age and Normal dist.
+plot(hist1, col = color1, ylim = c(0, 200), main = "Distribution of Observed Ages and Normal(56, 13)", xlab = "")
+legend("right", legend = c("N(56, 13)", "Observed", "Overlap"), fill = c(color1, color2, overlap))
+plot(hist2, col = color2, add = TRUE)
+```
+
+
+## Comparison to known distributions
+```{r, fig.width = 9}
+u = runif(1000)
+x = -1 * log(u)
+
+hist1 = hist(x, breaks = "Scott", main = "Inverse Transform of e^-x")
+hist2 = hist(data$Troponin, breaks = "Scott", main = "Troponin", xlab = "Troponin")
+
+color1 = rgb(0, 0, 1, 0.25)
+color2 = rgb(1, 0, 0, 0.25)
+overlap = rgb(0.5, 0, 0.5, 0.45)
+
+plot(hist1, col = color1, ylim = c(0, 1200), main = "Distribution of Observed Troponin and exp(-x)", xlab = "")
+legend("right", legend = c("exp(-x)", "Observed", "Overlap"), fill = c(color1, color2, overlap))
+plot(hist2, col = color2, add = TRUE)
+```
+
+
+## Principal Component Analysis on covariate space
+```{r, fig.width = 9}
+#plotting correlation matrix to see if PCA may be helpful
+corrplot::corrplot(cor(data[, -9]), method = "color")
+PCA = prcomp(data[, -9])
+varExplained = cumsum(PCA$sdev ^ 2) / sum(PCA$sdev ^ 2)
+
+#checking for percentage explained by each additional PC
+errorPlot = barplot(varExplained, main = "Variation Explained by PCs")
+text(errorPlot, varExplained - 0.07, labels = round(varExplained, 4), col = "firebrick")
+axis(1, at = seq(0.7, 11.5, length = 10), labels = paste("PC", 1:10), las = 2)
+
+summary(PCA)
+M = which(varExplained > 0.90)[1]
+```
+
+
+## Bootstrap estimates of mean and std. dev.
+```{r, fig.width = 9, fig.height = 7}
+#bootstrapping of age and troponin
+nBoot = 1000
+meanEstAge = rep(NA, times = nBoot)
+meanEstTrop = rep(NA, times = nBoot)
+sdEstAge = rep(NA, times = nBoot)
+sdEstTrop = rep(NA, times = nBoot)
+
+#bootstrap estimation of mean and std. deviation for age and troponin
+for (i in 1:nBoot) {
+  xBootAge = sample(data$Age, size = length(data$Age), replace = TRUE)
+  xBootTrop = sample(data$Troponin, size = length(data$Troponin), replace = TRUE)
+  
+  meanEstAge[i] = mean(xBootAge)
+  meanEstTrop[i] = mean(xBootTrop)
+  
+  sdEstAge[i] = sd(xBootAge)
+  sdEstTrop[i] = sd(xBootTrop)
+}
+
+#plotting of bootstrapping results
+par(mfrow = c(2, 2))
+hist(meanEstAge, breaks = "Scott", xlab = "", main = "Age Mean")
+lower = round(quantile(meanEstAge, 0.025), 5)
+upper = round(quantile(meanEstAge, (1 - 0.025)), 5)
+abline(v = lower, col = "red")
+abline(v = upper, col = "red")
+
+hist(meanEstTrop, breaks = "Scott", xlab = "", main = "Troponin Mean")
+lower = round(quantile(meanEstTrop, 0.025), 5)
+upper = round(quantile(meanEstTrop, (1 - 0.025)), 5)
+abline(v = lower, col = "red")
+abline(v = upper, col = "red")
+
+hist(sdEstAge, breaks = "Scott", xlab = "", main = "Age Std. Dev.")
+lower = round(quantile(sdEstAge, 0.025), 5)
+upper = round(quantile(sdEstAge, (1 - 0.025)), 5)
+abline(v = lower, col = "red")
+abline(v = upper, col = "red")
+
+hist(sdEstTrop, breaks = "Scott", xlab = "", main = "Troponin Std. Dev.")
+lower = round(quantile(sdEstTrop, 0.025), 5)
+upper = round(quantile(sdEstTrop, (1 - 0.025)), 5)
+abline(v = lower, col = "red")
+abline(v = upper, col = "red")
+```
+
+
+## tSNE
+```{r}
+set.seed(4241)
+
+#plotting tsne embedding
+tsneObj = Rtsne(as.matrix(data[, -9]))
+plot(tsneObj$Y, col = ifelse(data[, 9] == 1, "firebrick", "lightgreen"), pch = 16, xlab = "", ylab = "", main = "t-SNE Embedding")
+legend("bottomright", legend = c("Positive", "Negative"), fill = c("firebrick", "lightgreen"), title = "Heart Attack", title.cex = 0.8)
+```
+
+
+## k-means clustering
+```{r}
+set.seed(4241)
+
+#finding optimal amount of clusters for tsne
+bestClusters = fviz_nbclust(tsneObj$Y, kmeans, method = "wss", k.max = 8)
+plot(bestClusters)
+
+#using optimal clusters amount in dimension reduction
+cvKmeans = kmeans(tsneObj$Y, centers = 5)
+plot(tsneObj$Y, col = as.factor(cvKmeans$cluster), pch = 16, xlab = "", ylab = "", main = "K-Means Clustering on t-SNE Embedding")
+```
+
+
+## Predications using various approaches
+```{r}
+set.seed(4241)
+
+#k nearest neighbors (KNN)
+tunedKNN = tune.knn(xTrain, as.factor(yTrain), k = 1:50)
+knnModel = class::knn(xTrain, xTest, yTrain, k = tunedKNN$best.parameters)
+knnError = mean(knnModel != yTest)
+
+#GLMs (probit and logistic)
+logModel = glm(Result ~ ., data = train, family = binomial)
+logPred = ifelse(predict(logModel, newdata = xTest, type = "response") > 0.5, 1, 0)
+logError = mean(logPred != yTest)
+
+probitModel = glm(Result ~ ., data = train, family = binomial(link = "probit"))
+probitPred = ifelse(predict(probitModel, newdata = xTest, type = "response") > 0.5, 1, 0)
+probitError = mean(probitPred != yTest)
+
+#Logistic with squared terms
+logModel2 = glm(Result ~ Age + Gender + Heart.rate + Systolic.blood.pressure +  Diastolic.blood.pressure + Blood.sugar + I(CK.MB ^ 2) + I(Troponin ^ 2), data = train, family = binomial)
+logPred2 = ifelse(predict(logModel2, newdata = xTest, type = "response") > 0.5, 1, 0)
+logError2 = mean(logPred2 != yTest)
+```
+
+
+```{r, fig.width = 8}
+set.seed(4241)
+
+#LDA
+ldaModel = lda(Result ~ ., data = train)
+ldaPred = predict(ldaModel, newdata = xTest, type = "response")
+ldaError = mean(ldaPred$class != yTest)
+
+#QDA
+qdaModel = qda(Result ~ ., data = train)
+qdaPred = predict(qdaModel, newdata = xTest, type = "response")
+qdaError = mean(qdaPred$class != yTest)
+
+#SVM Radial
+svmRadial = tune.svm(Result ~ ., data = train, kernel = "radial", gamma = c(0.0001, 0.001, 0.01, 0.1, 1))
+radialCV = svmRadial$best.model
+svmRPred = ifelse(predict(radialCV, xTest, type = "response") > 0.5, 1, 0)
+svmRError = mean(svmRPred != yTest)
+
+#SVM Polynomial
+svmPoly = tune.svm(Result ~ ., data = train, kernel = "polynomial", degree = c(1, 2, 3, 4, 5))
+polyCV = svmPoly$best.model
+svmPPred = ifelse(predict(polyCV, xTest, type = "response") > 0.5, 1, 0)
+svmPError = mean(svmPPred != yTest)
+
+#output of results via table and plot
+cbind(KNN = knnError, Logistic = logError, Logistic2 = logError2, Probit = probitError, LDA = ldaError, QDA = qdaError, SVM_Radial = svmRError, SVM_Poly = svmPError)
+oneError = c(knnError, logError, logError2, probitError, ldaError, qdaError, svmRError, svmPError)
+
+methods = c("KNN", "Logistic", "Logistic^2", "Probit", "LDA", "QDA", "SVM_R", "SVM_P")
+errorPlot = barplot(oneError, names.arg = methods, main = "Test Error Values (One Simulation)", xlab = "Method", ylab = "Error")
+text(errorPlot, oneError - 0.07, labels = round(oneError, 4), col = "firebrick")
+```
+
+
+```{r}
+set.seed(1)
+
+#single decision tree
+cvTree = cv.tree(tree::tree(Result ~ ., data = train))
+depth = cvTree$size[which.min(cvTree$dev)] #CV depth is same as original tree fit
+
+treeError = rep(NA, times = 1000)
+
+#manually simulating 1000 trees
+for (i in 1:1000) {
+  trainIndices = sample(1:nrow(data), size = floor(nrow(data) * 0.8), replace = FALSE)
+  testIndices = base::setdiff(1:nrow(data), trainIndices)
+  
+  train = data[trainIndices,]
+  test = data[testIndices,]
+  
+  xTrain = train[, -9]
+  yTrain = train[, 9]
+  xTest = test[, -9]
+  yTest = test[, 9]
+
+  tree = rpart(Result ~ ., data = train, method = "class")
+  treePred = predict(tree, newdata = xTest, type = "class")
+  treeError[i] = mean(treePred != yTest)
+}
+
+#random forest
+p = ncol(xTrain)
+rfFit = randomForest(as.factor(Result) ~ ., data = train)
+rfPred = predict(rfFit, newdata = xTest)
+rfError = mean(rfPred != yTest)
+
+#bagging (mtry = p)
+bagFit = randomForest(as.factor(Result) ~ ., data = train, mtry = p)
+bagPred = predict(bagFit, newdata = xTest)
+bagError = mean(bagPred != yTest)
+
+cbind(avg_one_tree = mean(treeError), random_forest = rfError, bagging = bagError)
+rpart.plot(tree, type = 1)
+```
+
+
+## XGBoost and AdaBoost
+```{r}
+set.seed(1)
+n = 100
+rounds = 1:n
+xgbErrs = rep(NA, times = n)
+adaErrs = rep(NA, times = n)
+
+#xgboost prediction simulation
+for (i in 1:n) {
+  xgbModel = xgboost(as.matrix(xTrain), yTrain, nrounds = rounds[i], objective = "binary:logistic", verbose = FALSE)
+  xgbPred = ifelse(predict(xgbModel, newdata = as.matrix(xTest)) > 0.5, 1, 0)
+  xgbErrs[i] = mean(xgbPred != yTest)
+}
+
+#collecting lowest error from simulation rounds
+bestRounds = which.min(xgbErrs)
+xgbError = xgbErrs[bestRounds]
+
+
+#making a new dataset for adaboost cv function as it can't handle factor conversions
+dataNew = data
+dataNew$Gender = as.factor(dataNew$Gender)
+dataNew$Result = as.factor(dataNew$Result)
+
+adaModel = boosting.cv(Result ~ ., data = dataNew)
+
+cbind(XGBoost = xgbError, AdaBoost = adaModel$error)
+```
